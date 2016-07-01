@@ -12,7 +12,6 @@ RUN apt-get update && apt-get install -y \
         python-numpy \
         python-pip \
         python-scipy \
-        python-pandas \
         && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
@@ -25,6 +24,12 @@ RUN pip --no-cache-dir install \
         ipykernel \
         jupyter \
         matplotlib \
+        scikit-learn \
+        theano \
+        keras \
+        pandas \
+        flask \
+        tornado \
         && \
     python -m ipykernel.kernelspec
 
