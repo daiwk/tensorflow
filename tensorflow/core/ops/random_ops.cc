@@ -13,9 +13,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include "tensorflow/core/framework/common_shape_fns.h"
 #include "tensorflow/core/framework/op.h"
+#include "tensorflow/core/framework/shape_inference.h"
 
 namespace tensorflow {
+
+using shape_inference::DimensionHandle;
+using shape_inference::InferenceContext;
+using shape_inference::ShapeHandle;
 
 REGISTER_OP("RandomUniform")
     .Input("shape: T")
@@ -23,8 +29,9 @@ REGISTER_OP("RandomUniform")
     .Output("output: dtype")
     .Attr("seed: int = 0")
     .Attr("seed2: int = 0")
-    .Attr("dtype: {half,float,double}")
+    .Attr("dtype: {half,bfloat16,float,double}")
     .Attr("T: {int32, int64}")
+    .SetShapeFn(shape_inference::RandomShape)
     .Doc(R"doc(
 Outputs random values from a uniform distribution.
 
@@ -51,6 +58,7 @@ REGISTER_OP("RandomUniformInt")
     .Attr("seed2: int = 0")
     .Attr("Tout: {int32, int64}")
     .Attr("T: {int32, int64}")
+    .SetShapeFn(shape_inference::RandomShape)
     .Doc(R"doc(
 Outputs random integers from a uniform distribution.
 
@@ -79,8 +87,9 @@ REGISTER_OP("RandomStandardNormal")
     .Output("output: dtype")
     .Attr("seed: int = 0")
     .Attr("seed2: int = 0")
-    .Attr("dtype: {half,float,double}")
+    .Attr("dtype: {half,bfloat16,float,double}")
     .Attr("T: {int32, int64}")
+    .SetShapeFn(shape_inference::RandomShape)
     .Doc(R"doc(
 Outputs random values from a normal distribution.
 
@@ -96,14 +105,49 @@ seed2: A second seed to avoid seed collision.
 output: A tensor of the specified shape filled with random normal values.
 )doc");
 
+REGISTER_OP("ParameterizedTruncatedNormal")
+    .Input("shape: T")
+    .Input("means: dtype")
+    .Input("stdevs: dtype")
+    .Input("minvals: dtype")
+    .Input("maxvals: dtype")
+    .SetIsStateful()
+    .Output("output: dtype")
+    .Attr("seed: int = 0")
+    .Attr("seed2: int = 0")
+    .Attr("dtype: {half,bfloat16,float,double}")
+    .Attr("T: {int32, int64}")
+    .SetShapeFn(shape_inference::RandomShape)
+    .Doc(R"doc(
+Outputs random values from a normal distribution. The parameters may each be a
+scalar which applies to the entire output, or a vector of length shape[0] which
+stores the parameters for each batch.
+
+shape: The shape of the output tensor. Batches are indexed by the 0th dimension.
+means: The mean parameter of each batch.
+stdevs: The standard deviation parameter of each batch. Must be greater than 0.
+minvals: The minimum cutoff. May be -infinity.
+maxvals: The maximum cutoff. May be +infinity, and must be more than the minval
+  for each batch.
+dtype: The type of the output.
+seed: If either `seed` or `seed2` are set to be non-zero, the random number
+  generator is seeded by the given seed.  Otherwise, it is seeded by a
+  random seed.
+seed2: A second seed to avoid seed collision.
+
+output: A matrix of shape num_batches x samples_per_batch, filled with random
+  truncated normal values using the parameters for each row.
+)doc");
+
 REGISTER_OP("TruncatedNormal")
     .Input("shape: T")
     .SetIsStateful()
     .Output("output: dtype")
     .Attr("seed: int = 0")
     .Attr("seed2: int = 0")
-    .Attr("dtype: {half,float,double}")
+    .Attr("dtype: {half,bfloat16,float,double}")
     .Attr("T: {int32, int64}")
+    .SetShapeFn(shape_inference::RandomShape)
     .Doc(R"doc(
 Outputs random values from a truncated normal distribution.
 
@@ -129,6 +173,7 @@ REGISTER_OP("RandomShuffle")
     .Attr("seed: int = 0")
     .Attr("seed2: int = 0")
     .Attr("T: type")
+    .SetShapeFn(shape_inference::UnchangedShape)
     .Doc(R"doc(
 Randomly shuffles a tensor along its first dimension.
 
@@ -136,7 +181,7 @@ Randomly shuffles a tensor along its first dimension.
   to one and only one `output[i]`. For example, a mapping that might occur for a
   3x2 tensor is:
 
-```prettyprint
+```
 [[1, 2],       [[5, 6],
  [3, 4],  ==>   [1, 2],
  [5, 6]]        [3, 4]]
@@ -156,10 +201,21 @@ REGISTER_OP("Multinomial")
     .SetIsStateful()
     .Input("logits: T")
     .Input("num_samples: int32")
-    .Output("output: int64")
+    .Output("output: output_dtype")
     .Attr("seed: int = 0")
     .Attr("seed2: int = 0")
     .Attr("T: realnumbertype")
+    .Attr("output_dtype: {int32, int64} = DT_INT64")
+    .SetShapeFn([](InferenceContext* c) {
+      ShapeHandle logits_shape;
+      ShapeHandle unused;
+      DimensionHandle num_samples;
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(0), 2, &logits_shape));
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 0, &unused));
+      TF_RETURN_IF_ERROR(c->MakeDimForScalarInput(1, &num_samples));
+      c->set_output(0, c->Matrix(c->Dim(logits_shape, 0), num_samples));
+      return Status::OK();
+    })
     .Doc(R"doc(
 Draws samples from a multinomial distribution.
 
@@ -182,6 +238,13 @@ REGISTER_OP("RandomGamma")
     .Attr("seed2: int = 0")
     .Attr("S: {int32, int64}")
     .Attr("T: {half, float, double}")
+    .SetShapeFn([](InferenceContext* c) {
+      ShapeHandle out;
+      TF_RETURN_IF_ERROR(c->MakeShapeFromShapeTensor(0, &out));
+      TF_RETURN_IF_ERROR(c->Concatenate(out, c->input(1), &out));
+      c->set_output(0, out);
+      return Status::OK();
+    })
     .Doc(R"doc(
 Outputs random values from the Gamma distribution(s) described by alpha.
 
@@ -201,6 +264,71 @@ seed2: A second seed to avoid seed collision.
 output: A tensor with shape `shape + shape(alpha)`. Each slice
   `[:, ..., :, i0, i1, ...iN]` contains the samples drawn for
   `alpha[i0, i1, ...iN]`. The dtype of the output matches the dtype of alpha.
+)doc");
+
+REGISTER_OP("RandomPoisson")
+    .SetIsStateful()
+    .Input("shape: S")
+    .Input("rate: dtype")
+    .Output("output: dtype")
+    .Attr("seed: int = 0")
+    .Attr("seed2: int = 0")
+    .Attr("S: {int32, int64}")
+    .Attr("dtype: {half, float, double}")
+    .SetShapeFn([](InferenceContext* c) {
+      ShapeHandle out;
+      TF_RETURN_IF_ERROR(c->MakeShapeFromShapeTensor(0, &out));
+      TF_RETURN_IF_ERROR(c->Concatenate(out, c->input(1), &out));
+      c->set_output(0, out);
+      return Status::OK();
+    })
+    .Deprecated(25, "Replaced by RandomPoissonV2")
+    .Doc(R"doc(
+Use RandomPoissonV2 instead.
+)doc");
+
+REGISTER_OP("RandomPoissonV2")
+    .SetIsStateful()
+    .Input("shape: S")
+    .Input("rate: R")
+    .Output("output: dtype")
+    .Attr("seed: int = 0")
+    .Attr("seed2: int = 0")
+    .Attr("S: {int32, int64}")
+    .Attr("R: {half, float, double, int32, int64} = DT_DOUBLE")
+    .Attr("dtype: {half, float, double, int32, int64} = DT_INT64")
+    .SetShapeFn([](InferenceContext* c) {
+      ShapeHandle out;
+      TF_RETURN_IF_ERROR(c->MakeShapeFromShapeTensor(0, &out));
+      TF_RETURN_IF_ERROR(c->Concatenate(out, c->input(1), &out));
+      c->set_output(0, out);
+      return Status::OK();
+    })
+    .Doc(R"doc(
+Outputs random values from the Poisson distribution(s) described by rate.
+
+This op uses two algorithms, depending on rate. If rate >= 10, then
+the algorithm by Hormann is used to acquire samples via
+transformation-rejection.
+See http://www.sciencedirect.com/science/article/pii/0167668793909974.
+
+Otherwise, Knuth's algorithm is used to acquire samples via multiplying uniform
+random variables.
+See Donald E. Knuth (1969). Seminumerical Algorithms. The Art of Computer
+Programming, Volume 2. Addison Wesley
+
+shape: 1-D integer tensor. Shape of independent samples to draw from each
+  distribution described by the shape parameters given in rate.
+rate: A tensor in which each scalar is a "rate" parameter describing the
+  associated poisson distribution.
+seed: If either `seed` or `seed2` are set to be non-zero, the random number
+  generator is seeded by the given seed.  Otherwise, it is seeded by a
+  random seed.
+seed2: A second seed to avoid seed collision.
+
+output: A tensor with shape `shape + shape(rate)`. Each slice
+  `[:, ..., :, i0, i1, ...iN]` contains the samples drawn for
+  `rate[i0, i1, ...iN]`.
 )doc");
 
 }  // namespace tensorflow

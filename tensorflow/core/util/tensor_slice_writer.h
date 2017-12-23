@@ -15,7 +15,6 @@ limitations under the License.
 
 // The utility to write checkpoints for google brain tensor ops and v3
 // checkpoints for dist_belief.
-//
 
 #ifndef TENSORFLOW_UTIL_TENSOR_SLICE_WRITER_H_
 #define TENSORFLOW_UTIL_TENSOR_SLICE_WRITER_H_
@@ -33,8 +32,8 @@ limitations under the License.
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/macros.h"
 #include "tensorflow/core/platform/types.h"
-#include "tensorflow/core/util/saved_tensor_slice.pb.h"
 #include "tensorflow/core/util/saved_tensor_slice.pb_text.h"
+#include "tensorflow/core/util/saved_tensor_slice.pb.h"
 #include "tensorflow/core/util/saved_tensor_slice_util.h"
 
 namespace tensorflow {
@@ -65,7 +64,7 @@ class TensorSliceWriter {
   // Allocate "num_elements" elements in "ss" and save the data in "data"
   // there.
   template <typename T>
-  static Status SaveData(const T* data, int num_elements, SavedSlice* ss);
+  static Status SaveData(const T* data, int64 num_elements, SavedSlice* ss);
 
   static size_t MaxBytesPerElement(DataType dt);
 
@@ -162,7 +161,7 @@ Status TensorSliceWriter::Add(const string& name, const TensorShape& shape,
 }
 
 template <typename T>
-Status TensorSliceWriter::SaveData(const T* data, int num_elements,
+Status TensorSliceWriter::SaveData(const T* data, int64 num_elements,
                                    SavedSlice* ss) {
   size_t size_bound =
       ss->ByteSize() + kTensorProtoHeaderBytes +
@@ -179,7 +178,7 @@ Status TensorSliceWriter::SaveData(const T* data, int num_elements,
 }
 
 template <>
-Status TensorSliceWriter::SaveData(const string* data, int num_elements,
+Status TensorSliceWriter::SaveData(const string* data, int64 num_elements,
                                    SavedSlice* ss);
 
 // Create a table builder that will write to "filename" in

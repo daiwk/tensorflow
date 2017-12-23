@@ -11,13 +11,45 @@
 # the first for the host (the machine you're compiling on) and the second for
 # the target (the machine you want the program to run on).
 
+SHELL := /bin/bash
+
 # Host compilation settings
 
 # Find where we're running from, so we can store generated files here.
-MAKEFILE_DIR := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
+ifeq ($(origin MAKEFILE_DIR), undefined)
+	MAKEFILE_DIR := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
+endif
+
 HAS_GEN_HOST_PROTOC := \
 $(shell test -f $(MAKEFILE_DIR)/gen/protobuf-host/bin/protoc && echo "true" ||\
 echo "false")
+
+# Hexagon integration
+ifdef HEXAGON_LIBS
+	LIBGEMM_WRAPPER := $(HEXAGON_LIBS)/libhexagon_controller.so
+	ifeq ($(shell test -f $(LIBGEMM_WRAPPER) 2> /dev/null; echo $$?), 0)
+    $(info "Use hexagon libs at " $(LIBGEMM_WRAPPER))
+	else
+    $(error "hexagon libs not found at " $(LIBGEMM_WRAPPER))
+	endif
+	ifdef HEXAGON_INCLUDE
+		ifeq ($(shell test -d $(HEXAGON_INCLUDE) 2> /dev/null; echo $$?), 0)
+      $(info "Use hexagon libs at " $(HEXAGON_INCLUDE))
+		else
+      $(error "hexagon libs not found at " $(HEXAGON_INCLUDE))
+		endif
+	else
+    $(error "HEXAGON_INCLUDE is not set.")
+	endif
+	ifneq ($(TARGET),ANDROID)
+    $(error "hexagon is only supported on Android")
+	endif
+endif # HEXAGON_LIBS
+
+# If ANDROID_TYPES is not set assume __ANDROID_TYPES_SLIM__
+ifeq ($(ANDROID_TYPES),)
+	ANDROID_TYPES := -D__ANDROID_TYPES_SLIM__
+endif
 
 # Try to figure out the host system
 HOST_OS :=
@@ -33,36 +65,40 @@ else
 	endif
 endif
 
+HOST_ARCH := $(shell if [[ $(shell uname -m) =~ i[345678]86 ]]; then echo x86_32; else echo $(shell uname -m); fi)
+
 # Where compiled objects are stored.
 HOST_OBJDIR := $(MAKEFILE_DIR)/gen/host_obj/
 HOST_BINDIR := $(MAKEFILE_DIR)/gen/host_bin/
 HOST_GENDIR := $(MAKEFILE_DIR)/gen/host_obj/
 
-# Find the current Eigen version name from the Bazel build file
-EIGEN_HASH := $(shell cat eigen.BUILD | grep archive_dir | head -1 | cut -f3 -d- | cut -f1 -d\")
-
 # Settings for the host compiler.
 HOST_CXX := $(CC_PREFIX) gcc
 HOST_CXXFLAGS := --std=c++11
-HOST_LDOPTS := \
--L/usr/local/lib
-
+HOST_LDOPTS :=
 ifeq ($(HAS_GEN_HOST_PROTOC),true)
 	HOST_LDOPTS += -L$(MAKEFILE_DIR)/gen/protobuf-host/lib
 endif
+HOST_LDOPTS += -L/usr/local/lib
 
 HOST_INCLUDES := \
--I/usr/local/include \
 -I. \
+-I$(MAKEFILE_DIR)/../../../ \
 -I$(MAKEFILE_DIR)/downloads/ \
--I$(MAKEFILE_DIR)/downloads/eigen-eigen-$(EIGEN_HASH) \
+-I$(MAKEFILE_DIR)/downloads/eigen \
+-I$(MAKEFILE_DIR)/downloads/gemmlowp \
+-I$(MAKEFILE_DIR)/downloads/nsync/public \
+-I$(MAKEFILE_DIR)/downloads/fft2d \
 -I$(HOST_GENDIR)
-
 ifeq ($(HAS_GEN_HOST_PROTOC),true)
 	HOST_INCLUDES += -I$(MAKEFILE_DIR)/gen/protobuf-host/include
 endif
+# This is at the end so any globally-installed frameworks like protobuf don't
+# override local versions in the source tree.
+HOST_INCLUDES += -I/usr/local/include
 
 HOST_LIBS := \
+$(HOST_NSYNC_LIB) \
 -lstdc++ \
 -lprotobuf \
 -lpthread \
@@ -112,31 +148,40 @@ LIBDIR := $(GENDIR)lib/
 BINDIR := $(GENDIR)bin/
 PBTGENDIR := $(GENDIR)proto_text/
 PROTOGENDIR := $(GENDIR)proto/
+DEPDIR := $(GENDIR)dep/
+$(shell mkdir -p $(DEPDIR) >/dev/null)
 
 # Settings for the target compiler.
 CXX := $(CC_PREFIX) gcc
-OPTFLAGS := -O0
-CXXFLAGS := --std=c++11 -DIS_SLIM_BUILD $(OPTFLAGS)
-LDFLAGS := \
--L/usr/local/lib
+OPTFLAGS := -O2
 
-ifeq ($(HAS_GEN_HOST_PROTOC),true)
-	HOST_LDOPTS += -L$(MAKEFILE_DIR)/gen/protobuf-host/lib
+ifneq ($(TARGET),ANDROID)
+  OPTFLAGS += -march=native
 endif
 
+CXXFLAGS := --std=c++11 -DIS_SLIM_BUILD -fno-exceptions -DNDEBUG $(OPTFLAGS)
+LDFLAGS := \
+-L/usr/local/lib
+DEPFLAGS = -MT $@ -MMD -MP -MF $(DEPDIR)/$*.Td
+
 INCLUDES := \
--I/usr/local/include \
 -I. \
 -I$(MAKEFILE_DIR)/downloads/ \
--I$(MAKEFILE_DIR)/downloads/eigen-eigen-$(EIGEN_HASH) \
+-I$(MAKEFILE_DIR)/downloads/eigen \
+-I$(MAKEFILE_DIR)/downloads/gemmlowp \
+-I$(MAKEFILE_DIR)/downloads/nsync/public \
+-I$(MAKEFILE_DIR)/downloads/fft2d \
 -I$(PROTOGENDIR) \
 -I$(PBTGENDIR)
-
 ifeq ($(HAS_GEN_HOST_PROTOC),true)
 	INCLUDES += -I$(MAKEFILE_DIR)/gen/protobuf-host/include
 endif
+# This is at the end so any globally-installed frameworks like protobuf don't
+# override local versions in the source tree.
+INCLUDES += -I/usr/local/include
 
 LIBS := \
+$(TARGET_NSYNC_LIB) \
 -lstdc++ \
 -lprotobuf \
 -lz \
@@ -158,11 +203,21 @@ LIBFLAGS :=
 
 # If we're on OS X, make sure that globals aren't stripped out.
 ifeq ($(TARGET),OSX)
+ifeq ($(HAS_GEN_HOST_PROTOC),true)
+	LIBFLAGS += -L$(MAKEFILE_DIR)/gen/protobuf-host/lib
+	export LD_LIBRARY_PATH=$(MAKEFILE_DIR)/gen/protobuf-host/lib
+endif
 	LDFLAGS += -all_load
 endif
 # Make sure that we don't strip global constructors on Linux.
 ifeq ($(TARGET),LINUX)
+ifeq ($(HAS_GEN_HOST_PROTOC),true)
+	LIBFLAGS += -L$(MAKEFILE_DIR)/gen/protobuf-host/lib
+	export LD_LIBRARY_PATH=$(MAKEFILE_DIR)/gen/protobuf-host/lib
+endif
+	CXXFLAGS += -fPIC
 	LIBFLAGS += -Wl,--allow-multiple-definition -Wl,--whole-archive
+	LDFLAGS := -Wl,--no-whole-archive
 endif
 # If we're on Linux, also link in the dl library.
 ifeq ($(TARGET),LINUX)
@@ -170,13 +225,14 @@ ifeq ($(TARGET),LINUX)
 endif
 # If we're cross-compiling for the Raspberry Pi, use the right gcc.
 ifeq ($(TARGET),PI)
-	CXXFLAGS += -D__ANDROID_TYPES_SLIM__
+	CXXFLAGS += $(ANDROID_TYPES) -DRASPBERRY_PI
 	LDFLAGS := -Wl,--no-whole-archive
 	LIBS += -ldl -lpthread
 	LIBFLAGS += -Wl,--allow-multiple-definition -Wl,--whole-archive
 endif
 
 # Set up Android building
+# LINT.IfChange
 ifeq ($(TARGET),ANDROID)
 # Override NDK_ROOT on the command line with your own NDK location, e.g.
 # make -f tensorflow/contrib/makefile/Makefile TARGET=ANDROID \
@@ -184,59 +240,148 @@ ifeq ($(TARGET),ANDROID)
 # You need to have an Android version of the protobuf libraries compiled to link
 # in. The compile_android_protobuf.sh script may help.
 
-	OS_PATH :=
+	ANDROID_HOST_OS_ARCH :=
 	ifeq ($(HOST_OS),LINUX)
-		OS_PATH=linux
+		ANDROID_HOST_OS_ARCH=linux
 	endif
 	ifeq ($(HOST_OS),OSX)
-		OS_PATH=darwin
+		ANDROID_HOST_OS_ARCH=darwin
 	endif
 	ifeq ($(HOST_OS),WINDOWS)
-		$(error "windows is not supported.")
+    $(error "windows is not supported.")
 	endif
 
+	ifeq ($(HOST_ARCH),x86_32)
+		ANDROID_HOST_OS_ARCH := $(ANDROID_HOST_OS_ARCH)-x86
+	else
+		ANDROID_HOST_OS_ARCH := $(ANDROID_HOST_OS_ARCH)-$(HOST_ARCH)
+	endif
+    
+	ifndef ANDROID_ARCH
+		ANDROID_ARCH := armeabi-v7a
+	endif
+
+	ifeq ($(ANDROID_ARCH),arm64-v8a)
+		TOOLCHAIN := aarch64-linux-android-4.9
+		SYSROOT_ARCH := arm64
+		BIN_PREFIX := aarch64-linux-android
+		MARCH_OPTION :=
+	endif
+	ifeq ($(ANDROID_ARCH),armeabi)
+		TOOLCHAIN := arm-linux-androideabi-4.9
+		SYSROOT_ARCH := arm
+		BIN_PREFIX := arm-linux-androideabi
+		MARCH_OPTION :=
+	endif
+	ifeq ($(ANDROID_ARCH),armeabi-v7a)
+		TOOLCHAIN := arm-linux-androideabi-4.9
+		SYSROOT_ARCH := arm
+		BIN_PREFIX := arm-linux-androideabi
+		MARCH_OPTION := -march=armv7-a -mfloat-abi=softfp -mfpu=neon
+	endif
+	ifeq ($(ANDROID_ARCH),mips)
+		TOOLCHAIN := mipsel-linux-android-4.9
+		SYSROOT_ARCH := mips
+		BIN_PREFIX := mipsel-linux-android
+		MARCH_OPTION :=
+	endif
+	ifeq ($(ANDROID_ARCH),mips64)
+		TOOLCHAIN := mips64el-linux-android-4.9
+		SYSROOT_ARCH := mips64
+		BIN_PREFIX := mips64el-linux-android
+		MARCH_OPTION :=
+	endif
+	ifeq ($(ANDROID_ARCH),x86)
+		TOOLCHAIN := x86-4.9
+		SYSROOT_ARCH := x86
+		BIN_PREFIX := i686-linux-android
+		MARCH_OPTION :=
+	endif
+	ifeq ($(ANDROID_ARCH),x86_64)
+		TOOLCHAIN := x86_64-4.9
+		SYSROOT_ARCH := x86_64
+		BIN_PREFIX := x86_64-linux-android
+		MARCH_OPTION :=
+	endif
+    
 	ifndef NDK_ROOT
-		$(error "NDK_ROOT is not defined.")
+    $(error "NDK_ROOT is not defined.")
 	endif
-	CXX := $(CC_PREFIX) $(NDK_ROOT)/toolchains/arm-linux-androideabi-4.9/prebuilt/$(OS_PATH)-x86_64/bin/arm-linux-androideabi-g++
+	CXX := $(CC_PREFIX) $(NDK_ROOT)/toolchains/$(TOOLCHAIN)/prebuilt/$(ANDROID_HOST_OS_ARCH)/bin/$(BIN_PREFIX)-g++
+	CC := $(CC_PREFIX) $(NDK_ROOT)/toolchains/$(TOOLCHAIN)/prebuilt/$(ANDROID_HOST_OS_ARCH)/bin/$(BIN_PREFIX)-gcc
 	CXXFLAGS +=\
---sysroot $(NDK_ROOT)/platforms/android-21/arch-arm \
--Wno-c++11-narrowing \
--march=armv7-a \
--fPIE
-
+--sysroot $(NDK_ROOT)/platforms/android-21/arch-$(SYSROOT_ARCH) \
+-Wno-narrowing \
+-fomit-frame-pointer \
+$(MARCH_OPTION) \
+-fPIE \
+-fPIC
 	INCLUDES = \
 -I$(NDK_ROOT)/sources/android/support/include \
 -I$(NDK_ROOT)/sources/cxx-stl/gnu-libstdc++/4.9/include \
--I$(NDK_ROOT)/sources/cxx-stl/gnu-libstdc++/4.9/libs/armeabi/include \
+-I$(NDK_ROOT)/sources/cxx-stl/gnu-libstdc++/4.9/libs/$(ANDROID_ARCH)/include \
 -I. \
 -I$(MAKEFILE_DIR)/downloads/ \
--I$(MAKEFILE_DIR)/downloads/eigen-eigen-$(EIGEN_HASH) \
--I$(MAKEFILE_DIR)/gen/protobuf/include \
+-I$(MAKEFILE_DIR)/downloads/eigen \
+-I$(MAKEFILE_DIR)/downloads/gemmlowp \
+-I$(MAKEFILE_DIR)/downloads/nsync/public \
+-I$(MAKEFILE_DIR)/downloads/fft2d \
+-I$(MAKEFILE_DIR)/gen/protobuf_android/$(ANDROID_ARCH)/include \
 -I$(PROTOGENDIR) \
 -I$(PBTGENDIR)
 
 	LIBS := \
+$(TARGET_NSYNC_LIB) \
 -lgnustl_static \
 -lprotobuf \
 -llog \
 -lz \
--lm
+-lm \
+-ldl \
+-latomic
 
-	LD := $(NDK_ROOT)/toolchains/arm-linux-androideabi-4.9/prebuilt/$(OS_PATH)-x86_64/arm-linux-androideabi/bin/ld
+	LD := $(NDK_ROOT)/toolchains/$(TOOLCHAIN)/prebuilt/$(ANDROID_HOST_OS_ARCH)/$(BIN_PREFIX)/bin/ld
+
 	LDFLAGS := \
--march=armv7-a \
--L$(MAKEFILE_DIR)/gen/protobuf/lib \
--L$(NDK_ROOT)/sources/cxx-stl/gnu-libstdc++/4.9/libs/armeabi-v7a \
+$(MARCH_OPTION) \
+-L$(MAKEFILE_DIR)/gen/protobuf_android/$(ANDROID_ARCH)/lib \
+-L$(NDK_ROOT)/sources/cxx-stl/gnu-libstdc++/4.9/libs/$(ANDROID_ARCH) \
 -fPIE \
 -pie \
 -v
 
-	AR := $(NDK_ROOT)/toolchains/arm-linux-androideabi-4.9/prebuilt/$(OS_PATH)-x86_64/bin/arm-linux-androideabi-ar
+	AR := $(NDK_ROOT)/toolchains/$(TOOLCHAIN)/prebuilt/$(ANDROID_HOST_OS_ARCH)/bin/$(BIN_PREFIX)-ar
 	ARFLAGS := r
 	LIBFLAGS += -Wl,--allow-multiple-definition -Wl,--whole-archive
 
+	ifdef HEXAGON_LIBS
+		INCLUDES += -I$(HEXAGON_INCLUDE)
+		LIBS += -lhexagon_controller
+		LDFLAGS += -L$(HEXAGON_LIBS)
+		CXXFLAGS += -DUSE_HEXAGON_LIBS
+
+# CAVEAT: We should disable TENSORFLOW_DISABLE_META while running
+# quantized_matmul on Android because it crashes in
+# MultiThreadGemm in tensorflow/core/kernels/meta_support.cc
+# See http://b/33270149
+# TODO(satok): Remove once it's fixed
+		CXXFLAGS += -DTENSORFLOW_DISABLE_META
+
+# Declare __ANDROID_TYPES_FULL__ to enable required types for hvx
+		CXXFLAGS += -D__ANDROID_TYPES_FULL__
+	endif
+
+	ifdef ENABLE_EXPERIMENTAL_HEXNN_OPS
+		CXXFLAGS += -DENABLE_EXPERIMENTAL_HEXNN_OPS
+	endif
+	
+	OBJDIR := $(OBJDIR)android_$(ANDROID_ARCH)/
+	LIBDIR := $(LIBDIR)android_$(ANDROID_ARCH)/
+	BINDIR := $(BINDIR)android_$(ANDROID_ARCH)/
+	DEPDIR := $(DEPDIR)android_$(ANDROID_ARCH)/
+
 endif  # ANDROID
+# LINT.ThenChange(//tensorflow/contrib/android/cmake/CMakeLists.txt)
 
 # Settings for iOS.
 ifeq ($(TARGET),IOS)
@@ -247,23 +392,26 @@ ifeq ($(TARGET),IOS)
 	IPHONESIMULATOR_SYSROOT := $(shell xcrun --sdk iphonesimulator \
 	--show-sdk-path)
 	IOS_SDK_VERSION := $(shell xcrun --sdk iphoneos --show-sdk-version)
-	MIN_SDK_VERSION := 9.2
+	MIN_SDK_VERSION := 9.0
 # Override IOS_ARCH with ARMV7, ARMV7S, ARM64, or I386.
 	IOS_ARCH := X86_64
 	ifeq ($(IOS_ARCH),ARMV7)
 		CXXFLAGS += -miphoneos-version-min=$(MIN_SDK_VERSION) \
 		-arch armv7 \
-		-D__thread= \
+		-fembed-bitcode \
+		-D__thread=thread_local \
+		-DUSE_GEMM_FOR_CONV \
 		-Wno-c++11-narrowing \
 		-mno-thumb \
 		-DTF_LEAN_BINARY \
-		-D__ANDROID_TYPES_SLIM__ \
-		-DMIN_LOG_LEVEL=0 \
+		$(ANDROID_TYPES) \
 		-fno-exceptions \
 		-isysroot \
 		${IPHONEOS_SYSROOT}
 		LDFLAGS := -arch armv7 \
+		-fembed-bitcode \
 		-miphoneos-version-min=${MIN_SDK_VERSION} \
+		-framework Accelerate \
 		-Xlinker -S \
 		-Xlinker -x \
 		-Xlinker -dead_strip \
@@ -274,17 +422,20 @@ ifeq ($(TARGET),IOS)
 	ifeq ($(IOS_ARCH),ARMV7S)
 		CXXFLAGS += -miphoneos-version-min=$(MIN_SDK_VERSION) \
 		-arch armv7s \
-		-D__thread= \
+		-fembed-bitcode \
+		-D__thread=thread_local \
+		-DUSE_GEMM_FOR_CONV \
 		-Wno-c++11-narrowing \
 		-mno-thumb \
 		-DTF_LEAN_BINARY \
-		-D__ANDROID_TYPES_SLIM__ \
-		-DMIN_LOG_LEVEL=0 \
+		$(ANDROID_TYPES) \
 		-fno-exceptions \
 		-isysroot \
 		${IPHONEOS_SYSROOT}
 		LDFLAGS := -arch armv7s \
+		-fembed-bitcode \
 		-miphoneos-version-min=${MIN_SDK_VERSION} \
+		-framework Accelerate \
 		-Xlinker -S \
 		-Xlinker -x \
 		-Xlinker -dead_strip \
@@ -295,16 +446,19 @@ ifeq ($(TARGET),IOS)
 	ifeq ($(IOS_ARCH),ARM64)
 		CXXFLAGS += -miphoneos-version-min=$(MIN_SDK_VERSION) \
 		-arch arm64 \
-		-D__thread= \
+		-fembed-bitcode \
+		-D__thread=thread_local \
+		-DUSE_GEMM_FOR_CONV \
 		-Wno-c++11-narrowing \
 		-DTF_LEAN_BINARY \
-		-D__ANDROID_TYPES_SLIM__ \
-		-DMIN_LOG_LEVEL=0 \
+		$(ANDROID_TYPES) \
 		-fno-exceptions \
 		-isysroot \
 		${IPHONEOS_SYSROOT}
 		LDFLAGS := -arch arm64 \
+		-fembed-bitcode \
 		-miphoneos-version-min=${MIN_SDK_VERSION} \
+		-framework Accelerate \
 		-Xlinker -S \
 		-Xlinker -x \
 		-Xlinker -dead_strip \
@@ -315,16 +469,20 @@ ifeq ($(TARGET),IOS)
 	ifeq ($(IOS_ARCH),I386)
 		CXXFLAGS += -mios-simulator-version-min=$(MIN_SDK_VERSION) \
 		-arch i386 \
-		-D__thread= \
+		-mno-sse \
+		-fembed-bitcode \
+		-D__thread=thread_local \
+		-DUSE_GEMM_FOR_CONV \
 		-Wno-c++11-narrowing \
 		-DTF_LEAN_BINARY \
-		-D__ANDROID_TYPES_SLIM__ \
-		-DMIN_LOG_LEVEL=0 \
+		$(ANDROID_TYPES) \
 		-fno-exceptions \
 		-isysroot \
 		${IPHONESIMULATOR_SYSROOT}
 		LDFLAGS := -arch i386 \
+		-fembed-bitcode \
 		-mios-simulator-version-min=${MIN_SDK_VERSION} \
+		-framework Accelerate \
 		-Xlinker -S \
 		-Xlinker -x \
 		-Xlinker -dead_strip \
@@ -335,16 +493,19 @@ ifeq ($(TARGET),IOS)
 	ifeq ($(IOS_ARCH),X86_64)
 		CXXFLAGS += -mios-simulator-version-min=$(MIN_SDK_VERSION) \
 		-arch x86_64 \
-		-D__thread= \
+		-fembed-bitcode \
+		-D__thread=thread_local \
+		-DUSE_GEMM_FOR_CONV \
 		-Wno-c++11-narrowing \
 		-DTF_LEAN_BINARY \
-		-D__ANDROID_TYPES_SLIM__ \
-		-DMIN_LOG_LEVEL=0 \
+		$(ANDROID_TYPES) \
 		-fno-exceptions \
 		-isysroot \
 		${IPHONESIMULATOR_SYSROOT}
 		LDFLAGS := -arch x86_64 \
+		-fembed-bitcode \
 		-mios-simulator-version-min=${MIN_SDK_VERSION} \
+		-framework Accelerate \
 		-Xlinker -S \
 		-Xlinker -x \
 		-Xlinker -dead_strip \
@@ -352,6 +513,10 @@ ifeq ($(TARGET),IOS)
 		-L$(GENDIR)protobuf_ios/lib \
 		-lz
 	endif
+	OBJDIR := $(OBJDIR)ios_$(IOS_ARCH)/
+	LIBDIR := $(LIBDIR)ios_$(IOS_ARCH)/
+	BINDIR := $(BINDIR)ios_$(IOS_ARCH)/
+	DEPDIR := $(DEPDIR)ios_$(IOS_ARCH)/
 endif
 
 # This library is the main target for this makefile. It will contain a minimal
@@ -364,7 +529,68 @@ BENCHMARK_NAME := $(BINDIR)benchmark
 
 # What sources we want to compile, derived from the main Bazel build using the
 # gen_file_lists.sh script.
-TF_CC_SRCS := $(shell cat $(MAKEFILE_DIR)/tf_cc_files.txt)
+
+CORE_CC_ALL_SRCS := \
+$(wildcard tensorflow/core/*.cc) \
+$(wildcard tensorflow/core/common_runtime/*.cc) \
+$(wildcard tensorflow/core/framework/*.cc) \
+$(wildcard tensorflow/core/graph/*.cc) \
+$(wildcard tensorflow/core/grappler/*.cc) \
+$(wildcard tensorflow/core/grappler/*/*.cc) \
+$(wildcard tensorflow/core/lib/*/*.cc) \
+$(wildcard tensorflow/core/platform/*.cc) \
+$(wildcard tensorflow/core/platform/*/*.cc) \
+$(wildcard tensorflow/core/platform/*/*/*.cc) \
+$(wildcard tensorflow/core/util/*.cc) \
+$(wildcard tensorflow/core/util/*/*.cc) \
+tensorflow/core/util/version_info.cc
+# Remove duplicates (for version_info.cc)
+CORE_CC_ALL_SRCS := $(sort $(CORE_CC_ALL_SRCS))
+CORE_CC_EXCLUDE_SRCS := \
+$(wildcard tensorflow/core/*/*test.cc) \
+$(wildcard tensorflow/core/*/*testutil*) \
+$(wildcard tensorflow/core/*/*testlib*) \
+$(wildcard tensorflow/core/*/*main.cc) \
+$(wildcard tensorflow/core/*/*/*test.cc) \
+$(wildcard tensorflow/core/*/*/*testutil*) \
+$(wildcard tensorflow/core/*/*/*testlib*) \
+$(wildcard tensorflow/core/*/*/*main.cc) \
+$(wildcard tensorflow/core/debug/*.cc) \
+$(wildcard tensorflow/core/framework/op_gen_lib.cc) \
+$(wildcard tensorflow/core/graph/dot.*) \
+$(wildcard tensorflow/core/lib/db/*) \
+$(wildcard tensorflow/core/lib/gif/*) \
+$(wildcard tensorflow/core/lib/io/zlib*) \
+$(wildcard tensorflow/core/lib/io/record*) \
+$(wildcard tensorflow/core/lib/jpeg/*) \
+$(wildcard tensorflow/core/lib/png/*) \
+$(wildcard tensorflow/core/util/events_writer.*) \
+$(wildcard tensorflow/core/util/reporter.*) \
+$(wildcard tensorflow/core/platform/default/cuda_libdevice_path.*) \
+$(wildcard tensorflow/core/platform/default/stream_executor.*) \
+$(wildcard tensorflow/core/platform/default/test_benchmark.*) \
+$(wildcard tensorflow/core/platform/cuda.h) \
+$(wildcard tensorflow/core/platform/cuda_libdevice_path.*) \
+$(wildcard tensorflow/core/platform/cloud/*) \
+$(wildcard tensorflow/core/platform/google/*) \
+$(wildcard tensorflow/core/platform/google/*/*) \
+$(wildcard tensorflow/core/platform/jpeg.*) \
+$(wildcard tensorflow/core/platform/png.*) \
+$(wildcard tensorflow/core/platform/s3/*) \
+$(wildcard tensorflow/core/platform/stream_executor.*) \
+$(wildcard tensorflow/core/platform/windows/*) \
+$(wildcard tensorflow/core/user_ops/*.cu.cc) \
+$(wildcard tensorflow/core/common_runtime/gpu/*) \
+$(wildcard tensorflow/core/common_runtime/gpu_device_factory.*) \
+$(wildcard tensorflow/core/grappler/inputs/trivial_test_graph_input_yielder.*) \
+$(wildcard tensorflow/core/grappler/inputs/file_input_yielder.*) \
+$(wildcard tensorflow/core/grappler/clusters/single_machine.*)
+# Filter out all the excluded files.
+TF_CC_SRCS := $(filter-out $(CORE_CC_EXCLUDE_SRCS), $(CORE_CC_ALL_SRCS))
+# Add in any extra files that don't fit the patterns easily
+TF_CC_SRCS += tensorflow/contrib/makefile/downloads/fft2d/fftsg.c
+# Also include the op and kernel definitions.
+TF_CC_SRCS += $(shell cat $(MAKEFILE_DIR)/tf_op_files.txt)
 PBT_CC_SRCS := $(shell cat $(MAKEFILE_DIR)/tf_pb_text_files.txt)
 PROTO_SRCS := $(shell cat $(MAKEFILE_DIR)/tf_proto_files.txt)
 BENCHMARK_SRCS := \
@@ -372,8 +598,21 @@ tensorflow/core/util/reporter.cc \
 tensorflow/tools/benchmark/benchmark_model.cc \
 tensorflow/tools/benchmark/benchmark_model_main.cc
 
+ifdef HEXAGON_LIBS
+	TF_CC_SRCS += \
+tensorflow/cc/framework/scope.cc \
+tensorflow/cc/framework/ops.cc \
+tensorflow/cc/ops/const_op.cc \
+tensorflow/core/kernels/hexagon/graph_transfer_utils.cc \
+tensorflow/core/kernels/hexagon/graph_transferer.cc \
+tensorflow/core/kernels/hexagon/hexagon_control_wrapper.cc \
+tensorflow/core/kernels/hexagon/hexagon_ops_definitions.cc \
+tensorflow/core/kernels/hexagon/hexagon_remote_fused_graph_executor_build.cc
+endif
+
 # File names of the intermediate files target compilation generates.
-TF_CC_OBJS := $(addprefix $(OBJDIR), $(TF_CC_SRCS:.cc=.o))
+TF_CC_OBJS := $(addprefix $(OBJDIR), \
+$(patsubst %.cc,%.o,$(patsubst %.c,%.o,$(TF_CC_SRCS))))
 PBT_GEN_FILES := $(addprefix $(PBTGENDIR), $(PBT_CC_SRCS))
 PBT_OBJS := $(addprefix $(OBJDIR), $(PBT_CC_SRCS:.cc=.o))
 PROTO_CC_SRCS := $(addprefix $(PROTOGENDIR), $(PROTO_SRCS:.proto=.pb.cc))
@@ -387,6 +626,11 @@ BENCHMARK_OBJS := $(addprefix $(OBJDIR), $(BENCHMARK_SRCS:.cc=.o))
 all: $(LIB_PATH) $(BENCHMARK_NAME)
 
 # Rules for target compilation.
+
+
+.phony_version_info:
+tensorflow/core/util/version_info.cc: .phony_version_info
+	tensorflow/tools/git/gen_git_source.sh $@
 
 # Gathers together all the objects we've compiled into a single '.a' archive.
 $(LIB_PATH): $(LIB_OBJS)
@@ -402,7 +646,17 @@ $(BENCHMARK_NAME): $(BENCHMARK_OBJS) $(LIB_PATH)
 # Matches on the normal hand-written TensorFlow C++ source files.
 $(OBJDIR)%.o: %.cc | $(PBT_GEN_FILES)
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+	@mkdir -p $(dir $(DEPDIR)$*)
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
+	@mv -f $(DEPDIR)/$*.Td $(DEPDIR)/$*.d
+
+# Matches on plain C files.
+$(OBJDIR)%.o: %.c
+	@mkdir -p $(dir $@)
+	@mkdir -p $(dir $(DEPDIR)$*)
+	$(CXX) $(patsubst --std=c++11,--std=c99, $(CXXFLAGS)) -x c $(DEPFLAGS) \
+$(INCLUDES) -c $< -o $@
+	@mv -f $(DEPDIR)/$*.Td $(DEPDIR)/$*.d
 
 # Compiles C++ source files that have been generated by protoc.
 $(OBJDIR)%.pb.o: $(PROTOGENDIR)%.pb.cc
@@ -462,10 +716,27 @@ $(HOST_GENDIR)%.pb.cc $(HOST_GENDIR)%.pb.h: %.proto
 # Gets rid of all generated files.
 clean:
 	rm -rf $(MAKEFILE_DIR)/gen
+	rm -rf tensorflow/core/util/version_info.cc
+
+# Gets rid of all generated files except protobuf libs generated
+# before calling make.  This allows users not to recompile proto libs everytime.
+clean_except_protobuf_libs:
+	find $(MAKEFILE_DIR)/gen -mindepth 1 -maxdepth 1 ! -name "protobuf*" -exec rm -r "{}" \;
+	rm -rf tensorflow/core/util/version_info.cc
 
 # Gets rid of target files only, leaving the host alone. Also leaves the lib
 # directory untouched deliberately, so we can persist multiple architectures
-# across builds for iOS.
+# across builds for iOS and Android.
 cleantarget:
 	rm -rf $(OBJDIR)
 	rm -rf $(BINDIR)
+
+$(DEPDIR)/%.d: ;
+.PRECIOUS: $(DEPDIR)/%.d
+
+-include $(patsubst %,$(DEPDIR)/%.d,$(basename $(TF_CC_SRCS)))
+
+ifdef SUB_MAKEFILES
+  $(warning "include sub makefiles, must not contain white spaces in the path:" $(SUB_MAKEFILES))
+  include $(SUB_MAKEFILES)
+endif

@@ -58,12 +58,13 @@ class RandomAccessFileFromMemmapped : public RandomAccessFile {
   Status Read(uint64 offset, size_t to_read, StringPiece* result,
               char* scratch) const override {
     if (offset >= length_) {
-      result->set(scratch, 0);
+      *result = StringPiece(scratch, 0);
       return Status(error::OUT_OF_RANGE, "Read after file end");
     }
     const uint64 region_left =
         std::min(length_ - offset, static_cast<uint64>(to_read));
-    result->set(reinterpret_cast<const uint8*>(data_) + offset, region_left);
+    *result =
+        StringPiece(reinterpret_cast<const char*>(data_) + offset, region_left);
     return (region_left == to_read)
                ? Status::OK()
                : Status(error::OUT_OF_RANGE, "Read less bytes than requested");
@@ -79,12 +80,15 @@ class RandomAccessFileFromMemmapped : public RandomAccessFile {
 
 MemmappedFileSystem::MemmappedFileSystem() {}
 
-bool MemmappedFileSystem::FileExists(const string& fname) {
+Status MemmappedFileSystem::FileExists(const string& fname) {
   if (!mapped_memory_) {
-    return false;
+    return errors::FailedPrecondition("MemmappedEnv is not initialized");
   }
   const auto dir_element = directory_.find(fname);
-  return dir_element != directory_.end();
+  if (dir_element != directory_.end()) {
+    return Status::OK();
+  }
+  return errors::NotFound(fname, " not found");
 }
 
 Status MemmappedFileSystem::NewRandomAccessFile(
@@ -129,6 +133,15 @@ Status MemmappedFileSystem::GetFileSize(const string& filename, uint64* size) {
   return Status::OK();
 }
 
+Status MemmappedFileSystem::Stat(const string& fname, FileStatistics* stat) {
+  uint64 size;
+  auto status = GetFileSize(fname, &size);
+  if (status.ok()) {
+    stat->length = size;
+  }
+  return status;
+}
+
 Status MemmappedFileSystem::NewWritableFile(const string& filename,
                                             std::unique_ptr<WritableFile>* wf) {
   return errors::Unimplemented("memmapped format doesn't support writing");
@@ -165,8 +178,13 @@ const void* MemmappedFileSystem::GetMemoryWithOffset(uint64 offset) const {
   return reinterpret_cast<const uint8*>(mapped_memory_->data()) + offset;
 }
 
+#if defined(COMPILER_MSVC)
+constexpr char* MemmappedFileSystem::kMemmappedPackagePrefix;
+constexpr char* MemmappedFileSystem::kMemmappedPackageDefaultGraphDef;
+#else
 constexpr char MemmappedFileSystem::kMemmappedPackagePrefix[];
 constexpr char MemmappedFileSystem::kMemmappedPackageDefaultGraphDef[];
+#endif
 
 Status MemmappedFileSystem::InitializeFromFile(Env* env,
                                                const string& filename) {
