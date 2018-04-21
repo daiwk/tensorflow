@@ -24,6 +24,7 @@ limitations under the License.
 #include "tensorflow/core/lib/io/path.h"
 #include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/lib/strings/strcat.h"
+#include "tensorflow/core/platform/null_file_system.h"
 #include "tensorflow/core/platform/protobuf.h"
 #include "tensorflow/core/platform/test.h"
 
@@ -281,6 +282,15 @@ class TmpDirFileSystem : public NullFileSystem {
     StringPiece scheme, host, path;
     io::ParseURI(dir, &scheme, &host, &path);
     if (path.empty()) return errors::NotFound(dir, " not found");
+    // The special "flushed" file exists only if the filesystem's caches have
+    // been flushed.
+    if (path == "/flushed") {
+      if (flushed_) {
+        return Status::OK();
+      } else {
+        return errors::NotFound("FlushCaches() not called yet");
+      }
+    }
     return Env::Default()->FileExists(io::JoinPath(BaseDir(), path));
   }
 
@@ -295,9 +305,22 @@ class TmpDirFileSystem : public NullFileSystem {
     }
     return Env::Default()->CreateDir(io::JoinPath(BaseDir(), path));
   }
+
+  void FlushCaches() override { flushed_ = true; }
+
+ private:
+  bool flushed_ = false;
 };
 
 REGISTER_FILE_SYSTEM("tmpdirfs", TmpDirFileSystem);
+
+TEST_F(DefaultEnvTest, FlushFileSystemCaches) {
+  Env* env = Env::Default();
+  const string flushed = "tmpdirfs://testhost/flushed";
+  EXPECT_EQ(error::Code::NOT_FOUND, env->FileExists(flushed).code());
+  TF_EXPECT_OK(env->FlushFileSystemCaches());
+  TF_EXPECT_OK(env->FileExists(flushed));
+}
 
 TEST_F(DefaultEnvTest, RecursivelyCreateDirWithUri) {
   Env* env = Env::Default();
@@ -350,9 +373,8 @@ TEST_F(DefaultEnvTest, CreateUniqueFileName) {
 
   EXPECT_TRUE(env->CreateUniqueFileName(&filename, suffix));
 
-  StringPiece str(filename);
-  EXPECT_TRUE(str.starts_with(prefix));
-  EXPECT_TRUE(str.ends_with(suffix));
+  EXPECT_TRUE(str_util::StartsWith(filename, prefix));
+  EXPECT_TRUE(str_util::EndsWith(filename, suffix));
 }
 
 }  // namespace tensorflow

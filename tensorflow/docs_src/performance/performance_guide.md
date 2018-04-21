@@ -78,7 +78,7 @@ training CIFAR-10 illustrates the use of the `tf.data` API along with
 The `tf.data` API utilizes C++ multi-threading and has a much lower overhead
 than the Python-based `queue_runner` that is limited by Python's multi-threading
 performance. A detailed performance guide for the `tf.data` API can be found
-[here](#datasets_performance).
+[here](@{$datasets_performance}).
 
 While feeding data using a `feed_dict` offers a high level of flexibility, in
 general `feed_dict` does not provide a scalable solution. If only a single GPU
@@ -203,8 +203,8 @@ bn = tf.contrib.layers.batch_norm(input_layer, fused=True, data_format='NCHW')
 
 ### RNN Performance
 
-There are many ways to specify an RNN computation in Tensorflow and they have
-have trade-offs with respect to model flexibility and performance. The
+There are many ways to specify an RNN computation in TensorFlow and they have
+trade-offs with respect to model flexibility and performance. The
 @{tf.nn.rnn_cell.BasicLSTMCell} should be considered a reference implementation
 and used only as a last resort when no other options will work.
 
@@ -224,17 +224,13 @@ On NVIDIA GPUs, the use of @{tf.contrib.cudnn_rnn} should always be preferred
 unless you want layer normalization, which it doesn't support.  It is often at
 least an order of magnitude faster than @{tf.contrib.rnn.BasicLSTMCell} and
 @{tf.contrib.rnn.LSTMBlockCell} and uses 3-4x less memory than
-@{tf.contrib.rnn.BasicLSTMCell}.  Unfortunately, @{tf.contrib.cudnn_rnn} is not
-compatible with @{tf.train.SyncReplicasOptimizer} so you should either use a
-different synchronization mechanism (consider an all-reduce based strategy) or
-use the @{tf.contrib.rnn.LSTMBlockFusedCell} (at a significant performance
-penalty).
+@{tf.contrib.rnn.BasicLSTMCell}.
 
 If you need to run one step of the RNN at a time, as might be the case in
 reinforcement learning with a recurrent policy, then you should use the
 @{tf.contrib.rnn.LSTMBlockCell} with your own environment interaction loop
 inside a @{tf.while_loop} construct. Running one step of the RNN at a time and
-returning to python is possible but it will be slower.
+returning to Python is possible, but it will be slower.
 
 On CPUs, mobile devices, and if @{tf.contrib.cudnn_rnn} is not available on
 your GPU, the fastest and most memory efficient option is
@@ -479,7 +475,7 @@ optimizations.
 ### TensorFlow with Intel® MKL DNN
 
 Intel® has added optimizations to TensorFlow for Intel® Xeon® and Intel® Xeon
-Phi™ though the use of Intel® Math Kernel Library for Deep Neural Networks
+Phi™ through the use of the Intel® Math Kernel Library for Deep Neural Networks
 (Intel® MKL-DNN) optimized primitives. The optimizations also provide speedups
 for the consumer line of processors, e.g. i5 and i7 Intel processors. The Intel
 published paper
@@ -502,7 +498,7 @@ For TensorFlow source versions after 1.3.0:
 ```bash
 ./configure
 # Pick the desired options
-bazel build --config=mkl -c opt //tensorflow/tools/pip_package:build_pip_package
+bazel build --config=mkl --config=opt //tensorflow/tools/pip_package:build_pip_package
 
 ```
 
@@ -585,9 +581,9 @@ Each variable that impacts performance is discussed below.
     for optimal settings.
 
 *   **intra_op_parallelism_threads**: Setting this equal to the number of
-    physical cores is recommended. Setting the value to 0, which is the default
-    and will result in the value being set to the number of logical cores, is an
-    option to try for some architectures.  This value and `OMP_NUM_THREADS`
+    physical cores is recommended. Setting the value to 0, which is the default,
+    results in the value being set to the number of logical cores - this is an
+    alternate option to try for some architectures.  This value and `OMP_NUM_THREADS`
     should be equal.
 
 *   **inter_op_parallelism_threads**: Setting this equal to the number of

@@ -42,6 +42,7 @@ _SESSION_CONFIG_ERR = 'session_config must be instance of ConfigProto'
 _KEEP_CKPT_MAX_ERR = 'keep_checkpoint_max should be >= 0'
 _KEEP_CKPT_HOURS_ERR = 'keep_checkpoint_every_n_hours should be > 0'
 _TF_RANDOM_SEED_ERR = 'tf_random_seed must be integer'
+_DEVICE_FN_ERR = 'device_fn must be callable with exactly one argument "op".'
 _ONE_CHIEF_ERR = 'The "cluster" in TF_CONFIG must have only one "chief" node.'
 _ONE_MASTER_ERR = 'The "cluster" in TF_CONFIG must have only one "master" node.'
 _INVALID_TASK_TYPE_FOR_EVAL_MASTER = (
@@ -83,6 +84,7 @@ class RunConfigTest(test.TestCase):
     self.assertEqual(5, config.keep_checkpoint_max)
     self.assertEqual(10000, config.keep_checkpoint_every_n_hours)
     self.assertIsNone(config.service)
+    self.assertIsNone(config.device_fn)
 
   def test_model_dir(self):
     empty_config = run_config_lib.RunConfig()
@@ -93,6 +95,7 @@ class RunConfigTest(test.TestCase):
 
   def test_replace_with_allowed_properties(self):
     session_config = config_pb2.ConfigProto(allow_soft_placement=True)
+    device_fn = lambda op: "/cpu:0"
 
     config = run_config_lib.RunConfig().replace(
         tf_random_seed=11,
@@ -100,13 +103,15 @@ class RunConfigTest(test.TestCase):
         save_checkpoints_secs=14,
         session_config=session_config,
         keep_checkpoint_max=16,
-        keep_checkpoint_every_n_hours=17)
+        keep_checkpoint_every_n_hours=17,
+        device_fn=device_fn)
     self.assertEqual(11, config.tf_random_seed)
     self.assertEqual(12, config.save_summary_steps)
     self.assertEqual(14, config.save_checkpoints_secs)
     self.assertEqual(session_config, config.session_config)
     self.assertEqual(16, config.keep_checkpoint_max)
     self.assertEqual(17, config.keep_checkpoint_every_n_hours)
+    self.assertEqual(device_fn, config.device_fn)
 
   def test_replace_none_value(self):
     config = run_config_lib.RunConfig().replace(
@@ -117,7 +122,8 @@ class RunConfigTest(test.TestCase):
         save_checkpoints_steps=None,
         session_config=None,
         keep_checkpoint_max=None,
-        keep_checkpoint_every_n_hours=None)
+        keep_checkpoint_every_n_hours=None,
+        device_fn=None)
     self.assertIsNone(config.tf_random_seed)
     self.assertIsNone(config.model_dir)
     self.assertIsNone(config.save_summary_steps)
@@ -126,6 +132,7 @@ class RunConfigTest(test.TestCase):
     self.assertIsNone(config.session_config)
     self.assertIsNone(config.keep_checkpoint_max)
     self.assertIsNone(config.keep_checkpoint_every_n_hours)
+    self.assertIsNone(config.device_fn)
 
   def test_replace_with_disallowallowed_properties(self):
     config = run_config_lib.RunConfig()
@@ -166,9 +173,12 @@ class RunConfigTest(test.TestCase):
       config.replace(keep_checkpoint_every_n_hours=0)
     with self.assertRaisesRegexp(ValueError, _TF_RANDOM_SEED_ERR):
       config.replace(tf_random_seed=1.0)
+    with self.assertRaisesRegexp(ValueError, _DEVICE_FN_ERR):
+      config.replace(device_fn=lambda x, y: 0)
 
   def test_init_with_allowed_properties(self):
     session_config = config_pb2.ConfigProto(allow_soft_placement=True)
+    device_fn = lambda op: "/cpu:0"
 
     config = run_config_lib.RunConfig(
         tf_random_seed=11,
@@ -176,13 +186,15 @@ class RunConfigTest(test.TestCase):
         save_checkpoints_secs=14,
         session_config=session_config,
         keep_checkpoint_max=16,
-        keep_checkpoint_every_n_hours=17)
+        keep_checkpoint_every_n_hours=17,
+        device_fn=device_fn)
     self.assertEqual(11, config.tf_random_seed)
     self.assertEqual(12, config.save_summary_steps)
     self.assertEqual(14, config.save_checkpoints_secs)
     self.assertEqual(session_config, config.session_config)
     self.assertEqual(16, config.keep_checkpoint_max)
     self.assertEqual(17, config.keep_checkpoint_every_n_hours)
+    self.assertEqual(device_fn, config.device_fn)
 
   def test_init_none_value(self):
     config = run_config_lib.RunConfig(
@@ -193,7 +205,8 @@ class RunConfigTest(test.TestCase):
         save_checkpoints_steps=None,
         session_config=None,
         keep_checkpoint_max=None,
-        keep_checkpoint_every_n_hours=None)
+        keep_checkpoint_every_n_hours=None,
+        device_fn=None)
     self.assertIsNone(config.tf_random_seed)
     self.assertIsNone(config.model_dir)
     self.assertIsNone(config.save_summary_steps)
@@ -202,6 +215,7 @@ class RunConfigTest(test.TestCase):
     self.assertIsNone(config.session_config)
     self.assertIsNone(config.keep_checkpoint_max)
     self.assertIsNone(config.keep_checkpoint_every_n_hours)
+    self.assertIsNone(config.device_fn)
 
   def test_init_invalid_values(self):
     with self.assertRaisesRegexp(ValueError, _MODEL_DIR_ERR):
@@ -220,6 +234,8 @@ class RunConfigTest(test.TestCase):
       run_config_lib.RunConfig(keep_checkpoint_every_n_hours=0)
     with self.assertRaisesRegexp(ValueError, _TF_RANDOM_SEED_ERR):
       run_config_lib.RunConfig(tf_random_seed=1.0)
+    with self.assertRaisesRegexp(ValueError, _DEVICE_FN_ERR):
+      run_config_lib.RunConfig(device_fn=lambda x: "/cpu:0")
 
 
 class RunConfigDistributedSettingTest(test.TestCase):
@@ -262,8 +278,9 @@ class RunConfigDistributedSettingTest(test.TestCase):
             'index': 0
         }
     }
+    run_config = _create_run_config_with_cluster_spec(tf_config)
     self._assert_distributed_properties(
-        run_config=_create_run_config_with_cluster_spec(tf_config),
+        run_config=run_config,
         expected_cluster_spec={},
         expected_task_type=run_config_lib.TaskType.WORKER,
         expected_task_id=0,
@@ -272,6 +289,7 @@ class RunConfigDistributedSettingTest(test.TestCase):
         expected_is_chief=True,
         expected_num_worker_replicas=1,
         expected_num_ps_replicas=0)
+    self.assertEqual(0, run_config.global_id_in_cluster)
 
   def test_session_master_for_local(self):
     tf_config = {'session_master': '_my_master'}
@@ -544,8 +562,9 @@ class RunConfigDistributedSettingTest(test.TestCase):
             'index': 12
         }
     }
+    run_config = _create_run_config_with_cluster_spec(tf_config)
     self._assert_distributed_properties(
-        run_config=_create_run_config_with_cluster_spec(tf_config),
+        run_config=run_config,
         expected_cluster_spec={},
         expected_task_type=run_config_lib.TaskType.EVALUATOR,
         expected_task_id=12,
@@ -554,6 +573,7 @@ class RunConfigDistributedSettingTest(test.TestCase):
         expected_is_chief=False,  # evaluator is never chief.
         expected_num_worker_replicas=0,  # evaluator is not in training cluster.
         expected_num_ps_replicas=0)
+    self.assertIsNone(run_config.global_id_in_cluster)
 
   def test_eval_master_for_evaluator(self):
     tf_config = {
@@ -583,6 +603,71 @@ class RunConfigDistributedSettingTest(test.TestCase):
     }
     with self.assertRaisesRegexp(ValueError, _NEGATIVE_TASK_INDEX_ERR):
       _create_run_config_with_cluster_spec(tf_config)
+
+  def test_global_id_in_cluster_for_chief(self):
+    tf_config = {
+        'cluster': {
+            run_config_lib.TaskType.CHIEF: ['host0:0'],
+            run_config_lib.TaskType.WORKER: ['host3:3', 'host4:4', 'host5:5'],
+            run_config_lib.TaskType.PS: ['host6:3', 'host7:4', 'host8:5']
+        },
+        'task': {
+            'type': run_config_lib.TaskType.CHIEF,
+            'index': 0,
+        },
+    }
+    run_config = _create_run_config_with_cluster_spec(tf_config)
+    self.assertEqual(0, run_config.global_id_in_cluster)
+
+  def test_global_id_in_cluster_for_worker(self):
+    tf_config = {
+        'cluster': {
+            run_config_lib.TaskType.CHIEF: ['host0:0'],
+            run_config_lib.TaskType.WORKER: ['host3:3', 'host4:4', 'host5:5'],
+            run_config_lib.TaskType.PS: ['host6:3', 'host7:4', 'host8:5']
+        },
+        'task': {
+            'type': run_config_lib.TaskType.WORKER,
+            'index': 2,
+        },
+    }
+    run_config = _create_run_config_with_cluster_spec(tf_config)
+    self.assertEqual(3, run_config.global_id_in_cluster)
+
+  def test_global_id_in_cluster_for_ps(self):
+    tf_config = {
+        'cluster': {
+            run_config_lib.TaskType.CHIEF: ['host0:0'],
+            run_config_lib.TaskType.WORKER: ['host3:3', 'host4:4', 'host5:5'],
+            run_config_lib.TaskType.PS: ['host6:3', 'host7:4', 'host8:5']
+        },
+        'task': {
+            'type': run_config_lib.TaskType.PS,
+            'index': 1,
+        },
+    }
+    run_config = _create_run_config_with_cluster_spec(tf_config)
+    self.assertEqual(5, run_config.global_id_in_cluster)
+
+  def test_global_id_in_cluster_for_multipe_worker_types(self):
+    tf_config = {
+        'cluster': {
+            run_config_lib.TaskType.CHIEF: ['host0:0'],
+            'worker': ['host3:3', 'host4:4', 'host5:5'],
+            'other_type': ['host3:1', 'host4:2'],
+            run_config_lib.TaskType.PS: ['host6:3', 'host7:4', 'host8:5']
+        },
+        'task': {
+            'type': 'other_type',
+            'index': 1,
+        },
+    }
+    # Though 'other_type' is defined after 'worker', based on alphabetical
+    # order, the task type order should be 'chief', 'other_type', 'worker',
+    # 'ps', where 'chief' and 'ps' are predefined to be the top and last in the
+    # order list.
+    run_config = _create_run_config_with_cluster_spec(tf_config)
+    self.assertEqual(2, run_config.global_id_in_cluster)
 
 
 class RunConfigDistributedSettingWithMasterTest(test.TestCase):
@@ -851,6 +936,71 @@ class RunConfigDistributedSettingWithMasterTest(test.TestCase):
     with self.assertRaisesRegexp(ValueError,
                                  _INVALID_CHIEF_IN_CLUSTER_WITH_MASTER_ERR):
       _create_run_config_with_cluster_spec(tf_config)
+
+  def test_global_id_in_cluster_for_master(self):
+    tf_config = {
+        'cluster': {
+            run_config_lib.TaskType.MASTER: ['host0:0'],
+            run_config_lib.TaskType.WORKER: ['host3:3', 'host4:4', 'host5:5'],
+            run_config_lib.TaskType.PS: ['host6:3', 'host7:4', 'host8:5']
+        },
+        'task': {
+            'type': run_config_lib.TaskType.MASTER,
+            'index': 0,
+        },
+    }
+    run_config = _create_run_config_with_cluster_spec(tf_config)
+    self.assertEqual(0, run_config.global_id_in_cluster)
+
+  def test_global_id_in_cluster_for_worker(self):
+    tf_config = {
+        'cluster': {
+            run_config_lib.TaskType.MASTER: ['host0:0'],
+            run_config_lib.TaskType.WORKER: ['host3:3', 'host4:4', 'host5:5'],
+            run_config_lib.TaskType.PS: ['host6:3', 'host7:4', 'host8:5']
+        },
+        'task': {
+            'type': run_config_lib.TaskType.WORKER,
+            'index': 2,
+        },
+    }
+    run_config = _create_run_config_with_cluster_spec(tf_config)
+    self.assertEqual(3, run_config.global_id_in_cluster)
+
+  def test_global_id_in_cluster_for_ps(self):
+    tf_config = {
+        'cluster': {
+            run_config_lib.TaskType.MASTER: ['host0:0'],
+            run_config_lib.TaskType.WORKER: ['host3:3', 'host4:4', 'host5:5'],
+            run_config_lib.TaskType.PS: ['host6:3', 'host7:4', 'host8:5']
+        },
+        'task': {
+            'type': run_config_lib.TaskType.PS,
+            'index': 1,
+        },
+    }
+    run_config = _create_run_config_with_cluster_spec(tf_config)
+    self.assertEqual(5, run_config.global_id_in_cluster)
+
+  def test_global_id_in_cluster_for_multipe_worker_types(self):
+    tf_config = {
+        'cluster': {
+            run_config_lib.TaskType.MASTER: ['host0:0'],
+            'worker': ['host3:3', 'host4:4', 'host5:5'],
+            'other_type': ['host3:1', 'host4:2'],
+            run_config_lib.TaskType.PS: ['host6:3', 'host7:4', 'host8:5']
+        },
+        'task': {
+            'type': 'other_type',
+            'index': 1,
+        },
+    }
+    # Though 'other_type' is defined after 'worker', based on alphabetical
+    # order, the task type order should be 'chief', 'other_type', 'worker',
+    # 'ps', where 'chief' and 'ps' are predefined to be the top and last in the
+    # order list.
+    run_config = _create_run_config_with_cluster_spec(tf_config)
+    self.assertEqual(2, run_config.global_id_in_cluster)
 
 
 class RunConfigSaveCheckpointsTest(test.TestCase):

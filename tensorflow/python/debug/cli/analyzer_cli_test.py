@@ -30,6 +30,7 @@ from tensorflow.python.client import session
 from tensorflow.python.debug.cli import analyzer_cli
 from tensorflow.python.debug.cli import cli_config
 from tensorflow.python.debug.cli import cli_shared
+from tensorflow.python.debug.cli import cli_test_utils
 from tensorflow.python.debug.cli import command_parser
 from tensorflow.python.debug.cli import debugger_cli_common
 from tensorflow.python.debug.lib import debug_data
@@ -819,6 +820,32 @@ class AnalyzerCLISimpleMulAddTest(test_util.TensorFlowTestCase):
         op_type_regex="(Add|MatMul)")
     check_main_menu(self, out, list_tensors_enabled=False)
 
+  def testListTensorWithFilterAndNodeNameExclusionWorks(self):
+    # First, create and register the filter.
+    def is_2x1_vector(datum, tensor):
+      del datum  # Unused.
+      return list(tensor.shape) == [2, 1]
+    self._analyzer.add_tensor_filter("is_2x1_vector", is_2x1_vector)
+
+    # Use shorthand alias for the command prefix.
+    out = self._registry.dispatch_command(
+        "lt", ["-f", "is_2x1_vector", "--filter_exclude_node_names", ".*v.*"])
+
+    # If the --filter_exclude_node_names were not used, then the matching
+    # tensors would be:
+    #   - simple_mul_add/v:0
+    #   - simple_mul_add/v/read:0
+    #   - simple_mul_add/matmul:0
+    #   - simple_mul_add/add:0
+    #
+    # With the --filter_exclude_node_names option, only the last two should
+    # show up in the result.
+    assert_listed_tensors(
+        self,
+        out, ["simple_mul_add/matmul:0", "simple_mul_add/add:0"],
+        ["MatMul", "Add"], tensor_filter_name="is_2x1_vector")
+    check_main_menu(self, out, list_tensors_enabled=False)
+
   def testListTensorsFilterNanOrInf(self):
     """Test register and invoke a tensor filter."""
 
@@ -1226,21 +1253,23 @@ class AnalyzerCLISimpleMulAddTest(test_util.TensorFlowTestCase):
         "eval", ["np.matmul(`%s`, `%s`.T)" % (tensor_name, tensor_name)],
         screen_info={"cols": 80})
 
-    self.assertEqual([
-        "Tensor \"from eval of expression "
-        "'np.matmul(`simple_mul_add/matmul:0`, "
-        "`simple_mul_add/matmul:0`.T)'\":",
-        "  dtype: float64",
-        "  shape: (2, 2)",
-        "",
-        "Numeric summary:",
-        "| - + | total |",
-        "| 2 2 |     4 |",
-        "|           min           max          mean           std |",
-        "|         -14.0          49.0          6.25 25.7524270701 |",
-        "",
-        "array([[ 49., -14.],",
-        "       [-14.,   4.]])"], out.lines)
+    cli_test_utils.assert_lines_equal_ignoring_whitespace(
+        self,
+        ["Tensor \"from eval of expression "
+         "'np.matmul(`simple_mul_add/matmul:0`, "
+         "`simple_mul_add/matmul:0`.T)'\":",
+         "  dtype: float64",
+         "  shape: (2, 2)",
+         "",
+         "Numeric summary:",
+         "| - + | total |",
+         "| 2 2 |     4 |",
+         "|           min           max          mean           std |"],
+        out.lines[:8])
+    cli_test_utils.assert_array_lines_close(
+        self, [-14.0, 49.0, 6.25, 25.7524270701], out.lines[8:9])
+    cli_test_utils.assert_array_lines_close(
+        self, [[49.0, -14.0], [-14.0, 4.0]], out.lines[10:])
 
   def testEvalExpressionAndWriteToNpyFile(self):
     node_name = "simple_mul_add/matmul"

@@ -27,9 +27,13 @@ import six
 from tensorflow.core.protobuf import config_pb2
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.training import server_lib
+from tensorflow.python.estimator import util
+from tensorflow.python.util import compat_internal
+from tensorflow.python.util.tf_export import tf_export
 
 
 _USE_DEFAULT = object()
+_VALID_DEVICE_FN_ARGS = set(['op'])
 
 # A list of the property names in RunConfig that the user is allowed to change.
 _DEFAULT_REPLACEABLE_LIST = [
@@ -41,7 +45,9 @@ _DEFAULT_REPLACEABLE_LIST = [
     'session_config',
     'keep_checkpoint_max',
     'keep_checkpoint_every_n_hours',
-    'log_step_count_steps'
+    'log_step_count_steps',
+    'train_distribute',
+    'device_fn'
 ]
 
 _SAVE_CKPT_ERR = (
@@ -195,6 +201,34 @@ def _validate_task_type_and_task_id(cluster_spec, task_env, chief_task_type):
   return task_type, task_id
 
 
+def _get_global_id_in_cluster(
+    cluster_spec, task_type, task_id, chief_task_type):
+  """Returns the global id in cluster."""
+  # Note: This is implementation details, which user should not rely on.
+  # The first id is 0, which is always for the `chief` node. All other nodes,
+  # except `ps`, are ordered alphabetical based on task type (alphabetically)
+  # and task id (ascendingly). `ps` are ordered last.
+
+  # Sort task names in cluster
+  task_type_ordered_list = [chief_task_type]
+  task_type_ordered_list.extend([
+      t for t in sorted(cluster_spec.jobs)
+      if t != chief_task_type and t != TaskType.PS
+  ])
+  if TaskType.PS in cluster_spec.jobs:
+    task_type_ordered_list.append(TaskType.PS)
+
+  next_global_id = 0
+  for t in task_type_ordered_list:
+    if t == task_type:
+      return next_global_id + task_id
+    next_global_id += len(cluster_spec.job_tasks(t))
+
+  # This should never happen.
+  raise RuntimeError('Internal Error: `task_type` ({}) is not in '
+                     'cluster_spec ({}).'.format(task_type, cluster_spec))
+
+
 def _validate_save_ckpt_with_replaced_keys(new_copy, replaced_keys):
   """Validates the save ckpt properties."""
   # Ensure one (and only one) of save_steps and save_secs is not None.
@@ -248,6 +282,11 @@ def _validate_properties(run_config):
   _validate('tf_random_seed', lambda seed: isinstance(seed, six.integer_types),
             message='tf_random_seed must be integer.')
 
+  _validate('device_fn', lambda device_fn: six.callable(device_fn) and
+            set(util.fn_args(device_fn)) == _VALID_DEVICE_FN_ARGS,
+            message='device_fn must be callable with exactly'
+                    ' one argument "op".')
+
 
 class TaskType(object):
   MASTER = 'master'
@@ -257,6 +296,7 @@ class TaskType(object):
   EVALUATOR = 'evaluator'
 
 
+@tf_export('estimator.RunConfig')
 class RunConfig(object):
   """This class specifies the configurations for an `Estimator` run."""
 
@@ -269,7 +309,9 @@ class RunConfig(object):
                session_config=None,
                keep_checkpoint_max=5,
                keep_checkpoint_every_n_hours=10000,
-               log_step_count_steps=100):
+               log_step_count_steps=100,
+               train_distribute=None,
+               device_fn=None):
     """Constructs a RunConfig.
 
     All distributed training related properties `cluster_spec`, `is_chief`,
@@ -283,7 +325,7 @@ class RunConfig(object):
     a list of task addresses.
 
     `task` has two attributes: `type` and `index`, where `type` can be any of
-    the task types in `cluster`. ` When `TF_CONFIG` contains said information,
+    the task types in `cluster`. When `TF_CONFIG` contains said information,
     the following properties are set on this class:
 
     * `cluster_spec` is parsed from `TF_CONFIG['cluster']`. Defaults to {}. If
@@ -314,7 +356,7 @@ class RunConfig(object):
       os.environ['TF_CONFIG'] = json.dumps(
           {'cluster': cluster,
            'task': {'type': 'worker', 'index': 1}})
-      config = ClusterConfig()
+      config = RunConfig()
       assert config.master == 'host4:2222'
       assert config.task_id == 1
       assert config.num_ps_replicas == 2
@@ -332,7 +374,7 @@ class RunConfig(object):
       os.environ['TF_CONFIG'] = json.dumps(
           {'cluster': cluster,
            'task': {'type': 'chief', 'index': 0}})
-      config = ClusterConfig()
+      config = RunConfig()
       assert config.master == 'host0:2222'
       assert config.task_id == 0
       assert config.num_ps_replicas == 2
@@ -350,7 +392,7 @@ class RunConfig(object):
       os.environ['TF_CONFIG'] = json.dumps(
           {'cluster': cluster,
            'task': {'type': 'evaluator', 'index': 0}})
-      config = ClusterConfig()
+      config = RunConfig()
       assert config.master == ''
       assert config.evaluator_master == ''
       assert config.task_id == 0
@@ -371,7 +413,8 @@ class RunConfig(object):
 
     Args:
       model_dir: directory where model parameters, graph, etc are saved. If
-        `None`, will use a default value set by the Estimator.
+        `PathLike` object, the path will be resolved. If `None`, will use a
+        default value set by the Estimator.
       tf_random_seed: Random seed for TensorFlow initializers.
         Setting this value allows consistency between reruns.
       save_summary_steps: Save summaries every this many steps.
@@ -391,8 +434,15 @@ class RunConfig(object):
         to be saved. The default value of 10,000 hours effectively disables
         the feature.
       log_step_count_steps: The frequency, in number of global steps, that the
-        global step/sec will be logged during training.
-
+        global step/sec and the loss will be logged during training.
+      train_distribute: an optional instance of
+        `tf.contrib.distribute.DistributionStrategy`. If specified,
+        then Estimator will distribute the user's model during training,
+        according to the policy specified by that strategy.
+      device_fn: A callable invoked for every `Operation` that takes the
+        `Operation` and returns the device string. If `None`, defaults to
+        the device function returned by `tf.train.replica_device_setter`
+        with round-robin strategy.
 
     Raises:
       ValueError: If both `save_checkpoints_steps` and `save_checkpoints_secs`
@@ -414,7 +464,8 @@ class RunConfig(object):
     if tf_config:
       logging.info('TF_CONFIG environment variable: %s', tf_config)
 
-    model_dir = _get_model_dir(tf_config, model_dir)
+    model_dir = _get_model_dir(tf_config,
+                               compat_internal.path_to_str(model_dir))
 
     RunConfig._replace(
         self,
@@ -427,7 +478,9 @@ class RunConfig(object):
         session_config=session_config,
         keep_checkpoint_max=keep_checkpoint_max,
         keep_checkpoint_every_n_hours=keep_checkpoint_every_n_hours,
-        log_step_count_steps=log_step_count_steps)
+        log_step_count_steps=log_step_count_steps,
+        train_distribute=train_distribute,
+        device_fn=device_fn)
 
     self._init_distributed_setting_from_environment_var(tf_config)
 
@@ -456,18 +509,25 @@ class RunConfig(object):
         self._num_ps_replicas = _count_ps(self._cluster_spec)
         self._num_worker_replicas = _count_worker(
             self._cluster_spec, chief_task_type=TaskType.CHIEF)
+        self._global_id_in_cluster = _get_global_id_in_cluster(
+            self._cluster_spec,
+            self._task_type,
+            self._task_id,
+            chief_task_type=TaskType.CHIEF)
       else:
         # Evaluator is not part of the training cluster.
         self._cluster_spec = server_lib.ClusterSpec({})
         self._master = _LOCAL_MASTER
         self._num_ps_replicas = 0
         self._num_worker_replicas = 0
+        self._global_id_in_cluster = None  # undefined
 
       self._is_chief = self._task_type == TaskType.CHIEF
     else:
       # Local mode.
       self._task_type = task_env.get(_TASK_TYPE_KEY, TaskType.WORKER)
       self._task_id = int(task_env.get(_TASK_ID_KEY, 0))
+      self._global_id_in_cluster = 0
 
       if self._task_type != TaskType.WORKER:
         raise ValueError(
@@ -502,6 +562,12 @@ class RunConfig(object):
       raise ValueError('If `master` node exists in `cluster`, task_type '
                        '`evaluator` is not supported.')
 
+    self._global_id_in_cluster = _get_global_id_in_cluster(
+        self._cluster_spec,
+        self._task_type,
+        self._task_id,
+        chief_task_type=TaskType.MASTER)
+
     self._master = _get_session_master(self._cluster_spec, self._task_type,
                                        self._task_id, tf_config)
     self._evaluation_master = _get_eval_session_master(self._task_type,
@@ -515,6 +581,16 @@ class RunConfig(object):
   @property
   def cluster_spec(self):
     return self._cluster_spec
+
+  @property
+  def device_fn(self):
+    """Returns the device_fn.
+
+    If device_fn is not `None`, it overrides the default
+    device function used in `Estimator`.
+    Otherwise the default one is used.
+    """
+    return self._device_fn
 
   @property
   def evaluation_master(self):
@@ -539,6 +615,46 @@ class RunConfig(object):
   @property
   def task_id(self):
     return self._task_id
+
+  @property
+  def global_id_in_cluster(self):
+    """The global id in the training cluster.
+
+    All global ids in the training cluster are assigned from an increasing
+    sequence of consecutive integers. The first id is 0.
+
+    Note: Task id (the property field `task_id`) is tracking the index of the
+    node among all nodes with the SAME task type. For example, given the cluster
+    definition as follows:
+
+    ```
+      cluster = {'chief': ['host0:2222'],
+                 'ps': ['host1:2222', 'host2:2222'],
+                 'worker': ['host3:2222', 'host4:2222', 'host5:2222']}
+    ```
+
+    Nodes with task type `worker` can have id 0, 1, 2.  Nodes with task type
+    `ps` can have id, 0, 1. So, `task_id` is not unique, but the pair
+    (`task_type`, `task_id`) can uniquely determine a node in the cluster.
+
+    Global id, i.e., this field, is tracking the index of the node among ALL
+    nodes in the cluster. It is uniquely assigned.  For example, for the cluster
+    spec given above, the global ids are assigned as:
+    ```
+      task_type  | task_id  |  global_id
+      --------------------------------
+      chief      | 0        |  0
+      worker     | 0        |  1
+      worker     | 1        |  2
+      worker     | 2        |  3
+      ps         | 0        |  4
+      ps         | 1        |  5
+    ```
+
+    Returns:
+      An integer id.
+    """
+    return self._global_id_in_cluster
 
   @property
   def task_type(self):
@@ -585,12 +701,18 @@ class RunConfig(object):
     """Returns the platform defined (in TF_CONFIG) service dict."""
     return self._service
 
+  @property
+  def train_distribute(self):
+    """Returns the optional `tf.contrib.distribute.DistributionStrategy` object.
+    """
+    return self._train_distribute
+
   def replace(self, **kwargs):
     """Returns a new instance of `RunConfig` replacing specified properties.
 
     Only the properties in the following list are allowed to be replaced:
 
-      - `model_dir`.
+      - `model_dir`,
       - `tf_random_seed`,
       - `save_summary_steps`,
       - `save_checkpoints_steps`,
@@ -599,6 +721,8 @@ class RunConfig(object):
       - `keep_checkpoint_max`,
       - `keep_checkpoint_every_n_hours`,
       - `log_step_count_steps`,
+      - `train_distribute`,
+      - `device_fn`.
 
     In addition, either `save_checkpoints_steps` or `save_checkpoints_secs`
     can be set (should not be both).

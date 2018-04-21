@@ -57,7 +57,7 @@ class _ScanDataset(dataset_ops.Dataset):
     self._output_shapes = None
     self._output_types = None
 
-    # Iteratively rerun the scan function until reaching a fixed pont on
+    # Iteratively rerun the scan function until reaching a fixed point on
     # `self._state_shapes`.
     need_to_rerun = True
     while need_to_rerun:
@@ -188,7 +188,7 @@ def scan(initial_state, scan_func):
 
   Returns:
     A `Dataset` transformation function, which can be passed to
-    @{tf.contrib.data.Dataset.apply}.
+    @{tf.data.Dataset.apply}.
   """
   def _apply_fn(dataset):
     return _ScanDataset(dataset, initial_state, scan_func)
