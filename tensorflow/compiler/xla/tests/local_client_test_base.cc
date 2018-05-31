@@ -27,7 +27,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/test_helpers.h"
 #include "tensorflow/core/common_runtime/eigen_thread_pool.h"
 #include "tensorflow/core/lib/core/threadpool.h"
-#include "tensorflow/core/platform/cpu_info.h"
+#include "tensorflow/core/platform/byte_order.h"
 #include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/logging.h"
 
@@ -35,20 +35,20 @@ namespace xla {
 
 /* static */ TestAllocator* LocalClientTestBase::allocator_;
 
-StatusOr<se::DeviceMemoryBase> TestAllocator::Allocate(int device_ordinal,
-                                                       uint64 size,
-                                                       bool retry_on_failure) {
+StatusOr<OwningDeviceMemory> TestAllocator::Allocate(int device_ordinal,
+                                                     uint64 size,
+                                                     bool retry_on_failure) {
   VLOG(2) << "Allocate(" << device_ordinal << ", " << size << ")";
   {
     tensorflow::mutex_lock lock(count_mutex_);
     allocation_count_++;
     device_allocation_count_[device_ordinal]++;
   }
-  return StreamExecutorMemoryAllocator::Allocate(device_ordinal, size);
+  return StreamExecutorMemoryAllocator::Allocate(device_ordinal, size,
+                                                 retry_on_failure);
 }
 
-tensorflow::Status TestAllocator::Deallocate(int device_ordinal,
-                                             se::DeviceMemoryBase* mem) {
+Status TestAllocator::Deallocate(int device_ordinal, se::DeviceMemoryBase mem) {
   VLOG(2) << "Deallocate(" << device_ordinal << ")";
   {
     tensorflow::mutex_lock lock(count_mutex_);
@@ -148,15 +148,13 @@ ExecutableBuildOptions LocalClientTestBase::DefaultExecutableBuildOptions()
 
 ExecutableRunOptions LocalClientTestBase::DefaultExecutableRunOptions() const {
   ExecutableRunOptions run_options;
-  run_options.set_inter_op_thread_pool(
-      local_client_->backend().inter_op_thread_pool());
   run_options.set_intra_op_thread_pool(thread_pool_wrapper_->device.get());
   run_options.set_allocator(GetOrCreateAllocator(local_client_->platform()));
   return run_options;
 }
 
 ScopedShapedBuffer LocalClientTestBase::ExecuteLocallyOrDie(
-    const Computation& computation,
+    const XlaComputation& computation,
     tensorflow::gtl::ArraySlice<const ShapedBuffer*> arguments) {
   return ExecuteLocally(computation, arguments, DefaultExecutableBuildOptions(),
                         DefaultExecutableRunOptions())
@@ -164,7 +162,7 @@ ScopedShapedBuffer LocalClientTestBase::ExecuteLocallyOrDie(
 }
 
 ScopedShapedBuffer LocalClientTestBase::ExecuteLocallyOrDie(
-    const Computation& computation,
+    const XlaComputation& computation,
     tensorflow::gtl::ArraySlice<const ShapedBuffer*> arguments,
     const ExecutableBuildOptions& build_options,
     const ExecutableRunOptions& run_options) {
@@ -173,14 +171,14 @@ ScopedShapedBuffer LocalClientTestBase::ExecuteLocallyOrDie(
 }
 
 StatusOr<ScopedShapedBuffer> LocalClientTestBase::ExecuteLocally(
-    const Computation& computation,
+    const XlaComputation& computation,
     tensorflow::gtl::ArraySlice<const ShapedBuffer*> arguments) {
   return ExecuteLocally(computation, arguments, DefaultExecutableBuildOptions(),
                         DefaultExecutableRunOptions());
 }
 
 StatusOr<ScopedShapedBuffer> LocalClientTestBase::ExecuteLocally(
-    const Computation& computation,
+    const XlaComputation& computation,
     tensorflow::gtl::ArraySlice<const ShapedBuffer*> arguments,
     const ExecutableBuildOptions& build_options,
     const ExecutableRunOptions& run_options) {

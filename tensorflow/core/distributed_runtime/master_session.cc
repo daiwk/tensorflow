@@ -89,6 +89,10 @@ class MasterSession::ReffedClientGraph : public core::RefCounted {
   ~ReffedClientGraph() override {
     if (should_deregister_) {
       DeregisterPartitions();
+    } else {
+      for (Part& part : partitions_) {
+        worker_cache_->ReleaseWorker(part.name, part.worker);
+      }
     }
   }
 
@@ -115,7 +119,11 @@ class MasterSession::ReffedClientGraph : public core::RefCounted {
     // it on/off and don't make use of the responses.
     for (auto& p : partitions_) {
       LoggingRequest* req = new LoggingRequest;
-      req->set_rpc_logging(active);
+      if (active) {
+        req->set_enable_rpc_logging(true);
+      } else {
+        req->set_disable_rpc_logging(true);
+      }
       LoggingResponse* resp = new LoggingResponse;
       Ref();
       p.worker->LoggingAsync(req, resp, [this, req, resp](const Status& s) {
@@ -602,7 +610,7 @@ Status MasterSession::ReffedClientGraph::RunPartitionsHelper(
     // inadvertently slowing down the normal run path.
     if (is_partial_) {
       for (const auto& name_index : feeds) {
-        const auto iter = part.feed_key.find(name_index.first.ToString());
+        const auto iter = part.feed_key.find(std::string(name_index.first));
         if (iter == part.feed_key.end()) {
           // The provided feed must be for a different partition.
           continue;
@@ -946,7 +954,7 @@ Status MasterSession::ReffedClientGraph::CheckFetches(
     // Skip if already fed.
     if (input.second) continue;
     TensorId id(ParseTensorName(input.first));
-    const Node* n = execution_state->get_node_by_name(id.first.ToString());
+    const Node* n = execution_state->get_node_by_name(std::string(id.first));
     if (n == nullptr) {
       return errors::NotFound("Feed ", input.first, ": not found");
     }
@@ -962,7 +970,7 @@ Status MasterSession::ReffedClientGraph::CheckFetches(
   for (size_t i = 0; i < req.num_fetches(); ++i) {
     const string& fetch = req.fetch_name(i);
     const TensorId id(ParseTensorName(fetch));
-    const Node* n = execution_state->get_node_by_name(id.first.ToString());
+    const Node* n = execution_state->get_node_by_name(std::string(id.first));
     if (n == nullptr) {
       return errors::NotFound("Fetch ", fetch, ": not found");
     }
@@ -1174,14 +1182,8 @@ Status MasterSession::Create(GraphDef* graph_def,
     TF_RETURN_IF_ERROR(GraphExecutionState::MakeForBaseGraph(
         graph_def, execution_options, &execution_state_));
   }
-  // TODO(b/36574172): Remove these conditions when ClusterSpec
-  // propagation is supported in all servers.
-  if (options.cluster_def != nullptr ||
-      session_opts_.config.isolate_session_state()) {
-    should_delete_worker_sessions_ = true;
-    return CreateWorkerSessions(options);
-  }
-  return Status::OK();
+  should_delete_worker_sessions_ = true;
+  return CreateWorkerSessions(options);
 }
 
 Status MasterSession::CreateWorkerSessions(
@@ -1219,17 +1221,6 @@ Status MasterSession::CreateWorkerSessions(
     workers[i].name = &worker_names[i];
     workers[i].worker = worker_cache->CreateWorker(worker_names[i]);
     workers[i].request.set_session_handle(handle_);
-    if (options.cluster_def) {
-      *workers[i].request.mutable_server_def()->mutable_cluster() =
-          *options.cluster_def;
-      workers[i].request.mutable_server_def()->set_protocol(*options.protocol);
-      // Session state is always isolated when ClusterSpec propagation
-      // is in use.
-      workers[i].request.set_isolate_session_state(true);
-    } else {
-      workers[i].request.set_isolate_session_state(
-          session_opts_.config.isolate_session_state());
-    }
 
     DeviceNameUtils::ParsedName name;
     if (!DeviceNameUtils::ParseFullName(worker_names[i], &name)) {
@@ -1243,8 +1234,21 @@ Status MasterSession::CreateWorkerSessions(
       return status;
     }
 
-    workers[i].request.mutable_server_def()->set_job_name(name.job);
-    workers[i].request.mutable_server_def()->set_task_index(name.task);
+    if (options.cluster_def) {
+      *workers[i].request.mutable_server_def()->mutable_cluster() =
+          *options.cluster_def;
+      workers[i].request.mutable_server_def()->set_protocol(*options.protocol);
+      workers[i].request.mutable_server_def()->set_job_name(name.job);
+      workers[i].request.mutable_server_def()->set_task_index(name.task);
+      // Session state is always isolated when ClusterSpec propagation
+      // is in use.
+      workers[i].request.set_isolate_session_state(true);
+    } else {
+      // NOTE(mrry): Do not set any component of the ServerDef,
+      // because the worker will use its local configuration.
+      workers[i].request.set_isolate_session_state(
+          session_opts_.config.isolate_session_state());
+    }
   }
 
   for (size_t i = 0; i < worker_names.size(); ++i) {
